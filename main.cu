@@ -1,7 +1,14 @@
+#include <algorithm>
+#include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <thread>
+#include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -13,7 +20,8 @@
 #include "cugemms.cuh"
 #include "xgemms.cuh"
 
-template <typename T> class DeviceBuffer {
+template <typename T>
+class DeviceBuffer {
 public:
   DeviceBuffer() = default;
 
@@ -169,8 +177,11 @@ inline BenchmarkResult benchmark_kernel(const GemmShape &shape,
 
 // Column Major CPU parallelized Mat Mul
 template <typename T>
-std::vector<T> cpu_matmul_nn(const std::vector<T> &A, const std::vector<T> &B,
-                             std::size_t m, std::size_t n, std::size_t k) {
+std::vector<T> cpu_matmul_nn(const std::vector<T> &A,
+                             const std::vector<T> &B,
+                             std::size_t m,
+                             std::size_t n,
+                             std::size_t k) {
   std::vector<T> C(m * n, T{});
 
   if (A.size() != m * k || B.size() != k * n) {
@@ -260,38 +271,45 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
     cugemms::fp32_pedantic_nn(ref_cublas_handle.get(), shape.m, shape.n,
                               shape.k, refDxA.get(), refDxB.get(), refDxC.get(),
                               s);
-    CUDA_CHECK(cudaMemcpy(refxC.data(), dxC.get(), dxC.size() * sizeof(float),
-                          cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
-    cudaStreamDestroy(s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    CUDA_CHECK(cudaMemcpy(refxC.data(), refDxC.get(),
+                          refDxC.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaStreamDestroy(s));
   }
 
+
+
+
   CublasHandle cublas_handle;
+
+
+  CUDA_CHECK(cudaMemcpy(dxA.get(), hxA.data(), dxA.size() * sizeof(InputT),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dxB.get(), hxB.data(), dxB.size() * sizeof(InputT),
+                        cudaMemcpyHostToDevice));
+
 
   auto loaded_cu_kernel = [&](cudaStream_t stream) {
     cu_kernel(cublas_handle.get(), shape.m, shape.n, shape.k, dxA.get(),
               dxB.get(), dxC.get(), stream);
   };
 
-  CUDA_CHECK(cudaMemcpy(cublasxC.data(), dxC.get(), dxC.size() * sizeof(float),
-                        cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
-
-  CUDA_CHECK(cudaDeviceSynchronize());
-
   auto loaded_x_kernel = [&](cudaStream_t stream) {
     x_kernel(shape.m, shape.n, shape.k, dxA.get(), dxB.get(), dxC.get(),
              stream);
   };
 
-  CUDA_CHECK(cudaMemcpy(customxC.data(), dxC.get(), dxC.size() * sizeof(float),
+  BenchmarkResult cu_bench_result =
+      benchmark_kernel(shape, loaded_cu_kernel, warm_up_iters, bench_iters);
+  CUDA_CHECK(cudaMemcpy(cublasxC.data(), dxC.get(), dxC.size() * sizeof(float),
                         cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
 
-  BenchmarkResult cu_bench_result =
-      benchmark_kernel(shape, loaded_cu_kernel, warm_up_iters, bench_iters);
   BenchmarkResult x_bench_result =
       benchmark_kernel(shape, loaded_x_kernel, warm_up_iters, bench_iters);
+  CUDA_CHECK(cudaMemcpy(customxC.data(), dxC.get(), dxC.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
 
   double cublas_l2 = l2_error(refxC, cublasxC);
   double custom_l2 = l2_error(refxC, customxC);
@@ -299,22 +317,79 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
   return {{cu_bench_result, cublas_l2}, {x_bench_result, custom_l2}};
 }
 
-int main() {
+template <typename InputT, typename Xkernel, typename CuKernel>
+void benchmark_sweep(int max_n, Xkernel &&x_kernel, CuKernel &&cu_kernel,
+                     unsigned int seed_a, unsigned int seed_b, float lo = 0.0f,
+                     float hi = 1.0f, int warm_up_iters = 10,
+                     int bench_iters = 100) {
+  constexpr int kStartN = 32;
 
-  GemmShape shape({512, 512, 512});
+  std::cout << std::left
+            << std::setw(8) << "N"
+            << std::setw(14) << "cublas ms"
+            << std::setw(14) << "custom ms"
+            << std::setw(16) << "cublas/custom %"
+            << std::setw(18) << "cublas err"
+            << std::setw(18) << "custom err"
+            << '\n';
 
-  auto x_gemm = [&](int m, int n, int k, const __nv_bfloat16 *a_,
-                    const __nv_bfloat16 *b_, float *c_, cudaStream_t stream) {
-    xgemms::x_bf16(m, n, k, a_, b_, c_, stream);
-  };
+  std::cout << std::string(8 + 14 + 14 + 16 + 18 + 18, '-') << '\n';
 
-  auto cu_gemm = [&](cublasHandle_t handle, int m, int n, int k,
-                     const __nv_bfloat16 *a_, const __nv_bfloat16 *b_,
-                     float *c_, cudaStream_t stream) {
-    cugemms::bf16_tc_nn(handle, m, n, k, a_, b_, c_, stream);
-  };
+  for (int n = kStartN; n <= max_n; n *= 2) {
+    GemmShape shape{static_cast<unsigned int>(n),
+                    static_cast<unsigned int>(n),
+                    static_cast<unsigned int>(n)};
 
-  auto res = runner<__nv_bfloat16>(shape, x_gemm, cu_gemm, 1, 2);
+    auto res = runner<InputT>(shape,
+                              std::forward<Xkernel>(x_kernel),
+                              std::forward<CuKernel>(cu_kernel),
+                              seed_a,
+                              seed_b,
+                              lo,
+                              hi,
+                              warm_up_iters,
+                              bench_iters);
 
-  return 0;
+    const auto& cu_res = std::get<0>(res);
+    const auto& custom_res = std::get<1>(res);
+
+    const double cublas_ms = cu_res.res.avg_ms;
+    const double custom_ms = custom_res.res.avg_ms;
+    const double perf_pct = (cublas_ms > 0.0) ? (cublas_ms / custom_ms) * 100.0 : 0.0;
+
+    std::cout << std::right
+              << std::setw(8) << n
+              << std::fixed << std::setprecision(4)
+              << std::setw(14) << cublas_ms
+              << std::setw(14) << custom_ms
+              << std::setw(16) << perf_pct
+              << std::scientific << std::setprecision(3)
+              << std::setw(18) << cu_res.l2_err
+              << std::setw(18) << custom_res.l2_err
+              << std::defaultfloat
+              << '\n';
+  }
 }
+
+// NOW THE SPICY PART
+
+
+
+// int main() {
+
+//   auto x_gemm = [&](int m, int n, int k, const __nv_bfloat16 *a_,
+//                     const __nv_bfloat16 *b_, float *c_, cudaStream_t stream) {
+//     xgemms::x_bf16(m, n, k, a_, b_, c_, stream);
+//   };
+
+//   auto cu_gemm = [&](cublasHandle_t handle, int m, int n, int k,
+//                      const __nv_bfloat16 *a_, const __nv_bfloat16 *b_,
+//                      float *c_, cudaStream_t stream) {
+//     cugemms::bf16_tc_nn(handle, m, n, k, a_, b_, c_, stream);
+//   };
+
+//   benchmark_sweep<__nv_bfloat16>(4096, x_gemm, cu_gemm, 1, 2);
+
+//   return 0;
+// }
+//
