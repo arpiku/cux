@@ -21,7 +21,15 @@ target_include_directories(cux PRIVATE
 )
 
 find_package(CUDAToolkit REQUIRED)
+# For CPU Parallel fun
+find_package(OpenMP REQUIRED)
+
+target_compile_options(cux PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>
+)
+
 target_link_libraries(cux PRIVATE
     CUDA::cudart
     CUDA::cublas
+    OpenMP::OpenMP_CXX
 )

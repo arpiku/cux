@@ -1,46 +1,16 @@
-#include <cuda_runtime.h>
 #include <memory>
+#include <new>
 #include <vector>
-#include <cuda_bf16.h>
 #include <random>
 #include <thread>
 #include <iostream>
+
+#include <cuda_runtime.h>
+#include <cuda_bf16.h>
 #include <cublas_v2.h>
 
-inline void cuda_check_impl(cudaError_t status,
-                            const char* expr,
-                            const char* file,
-                            int line) {
-    if (status != cudaSuccess) {
-        std::fprintf(stderr,
-                     "CUDA_CHECK failed: %s\n  status: %s\n  at %s:%d\n",
-                     expr,
-                     cudaGetErrorString(status),
-                     file,
-                     line);
-        std::fflush(stderr);
-        std::abort();
-    }
-}
-inline void cublas_check_impl(cublasStatus_t status,
-                              const char* expr,
-                              const char* file,
-                              int line) {
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        std::fprintf(stderr,
-                     "CUBLAS_CHECK failed: %s\n  status: %d\n  at %s:%d\n",
-                     expr,
-                     static_cast<int>(status),
-                     file,
-                     line);
-        std::fflush(stderr);
-        std::abort();
-    }
-}
-
-#define CUDA_CHECK(expr) cuda_check_impl((expr), #expr, __FILE__, __LINE__)
-#define CUBLAS_CHECK(expr) cublas_check_impl((expr), #expr, __FILE__, __LINE__)
-
+#include "cugemms.cuh"
+#include "common.cuh"
 
 template <typename T>
 class DeviceBuffer {
@@ -73,6 +43,34 @@ private:
     std::unique_ptr<T, Deleter> ptr_;
     std::size_t size_ = 0;
 };
+
+
+struct CublasHandle {
+    CublasHandle() {
+        CUBLAS_CHECK(cublasCreate(&handle_));
+    }
+
+    CublasHandle(const CublasHandle&) = delete;
+    CublasHandle& operator=(const CublasHandle&) = delete;
+    CublasHandle(CublasHandle&&) = delete;
+    CublasHandle& operator=(CublasHandle&&) = delete;
+
+
+
+    ~CublasHandle() {
+        if (handle_ != nullptr) {
+            cublasDestroy(handle_);
+        }
+    }
+
+    cublasHandle_t get() const {
+        return handle_;
+    }
+
+private:
+    cublasHandle_t handle_ = nullptr;
+};
+
 
 template<typename T>
 void parallel_random_fill(std::vector<T>& vec, std::uint32_t seed, float lo, float hi) {
@@ -119,11 +117,7 @@ struct BenchmarkResult {
     float avg_ms = 0.0f;
 
     double tflops = 0.0;
-    double perf_pct = 0.0;
-
-    float error = 0.0f;
 };
-
 
 
 template <typename LaunchFn>
@@ -180,31 +174,127 @@ inline BenchmarkResult benchmark_kernel(const GemmShape& shape,
     return result;
 }
 
-
-struct CaseRun {
+struct BenchresultAndOutput {
     BenchmarkResult result;
     std::vector<float> output;
+};
+
+template <typename InputT, typename LaunchFn>
+BenchresultAndOutput run_gemm_case(const GemmShape& shape,
+                              const std::vector<InputT>& h_a,
+                              const std::vector<InputT>& h_b,
+                              cublasHandle_t handle,
+                              LaunchFn&& launch,
+                              int warmup_iters,
+                              int bench_iters,
+                              cudaStream_t stream) {
+
+    auto size = [] (uint r, uint c) { return r * c; };
+
+    DeviceBuffer<InputT> d_a(size(shape.m, shape.k));
+    DeviceBuffer<InputT> d_b(size(shape.k, shape.n));
+    DeviceBuffer<float> d_c(size(shape.m, shape.n));
+
+    CUDA_CHECK(cudaMemcpy(d_a.get(), h_a.data(), d_a.size() * sizeof(InputT), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_b.get(), h_b.data(), d_b.size() * sizeof(InputT), cudaMemcpyHostToDevice));
+
+    auto bench_launch = [&](const GemmShape&, cudaStream_t stream) {
+        launch(handle,
+               shape.m,
+               shape.n,
+               shape.k,
+               d_a.get(),
+               d_b.get(),
+               d_c.get(),
+               stream);
+    };
+
+    BenchmarkResult result =
+        benchmark_kernel(shape, bench_launch, warmup_iters, bench_iters, stream);
+
+    std::vector<float> output(d_c.size());
+    CUDA_CHECK(cudaMemcpy(output.data(),
+                          d_c.get(),
+                          d_c.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    return {result, std::move(output)};
+}
+
+/* More generic test function:
+ * run_gemm_case(ProblemShape, kernel_to_launch)
+ */
+
+
+// Column Major CPU parallelized Mat Mul
+template <typename T>
+std::vector<T> cpu_matmul_nn(const std::vector<T>& A,
+                                   const std::vector<T>& B,
+                                   std::size_t m,
+                                   std::size_t n,
+                                   std::size_t k) {
+    std::vector<T> C(m * n, T{});
+
+    if (A.size() != m * k || B.size() != k * n) {
+        return C;
+    }
+
+    #pragma omp parallel for collapse(2) schedule(static)
+    for (std::size_t j = 0; j < n; ++j) {
+        for (std::size_t i = 0; i < m; ++i) {
+            T sum = T{};
+            for (std::size_t p = 0; p < k; ++p) {
+                sum += A[i + p * m] * B[p + j * k];
+            }
+            C[i + j * m] = sum;
+        }
+    }
+
+    return C;
+}
+
+enum TestMode {
+    BF16,
+    FP32,
+    TF32
 };
 
 
 
 
-
-
-
-
 int main () {
-    const int N = 512;
-    std::vector<__nv_bfloat16> hxA(N);
-    std::vector<__nv_bfloat16> hxB(N);
+    const int N = 10;
+    std::vector<float> hxA(N*N);
+    std::vector<float> hxB(N*N);
+
+    std::vector<float> refxC(N*N);
 
     parallel_random_fill(hxA, 0, 0.0f, 1.0f);
     parallel_random_fill(hxB, 1, 0.0f, 1.0f);
 
 
-    DeviceBuffer<__nv_bfloat16> dxA(1024);
-    DeviceBuffer<__nv_bfloat16> dxB(1024);
-    DeviceBuffer<__nv_bfloat16> dxC(1024);
+    refxC = cpu_matmul_nn(hxA, hxB, N, N, N);
+
+    const GemmShape gshape({N, N, N});
+
+    CublasHandle cublas_handle;
+    int warmup_iters = 20;
+    int bench_iters = 100;
+
+    cudaStream_t stream;
+    CUDA_CHECK(cudaStreamCreate(&stream));
+
+    auto result = run_gemm_case(gshape, hxA, hxB, cublas_handle.get(), cugemms::fp32_pedantic_nn,warmup_iters,bench_iters, stream);
+
+    for(auto& val : result.output) {
+        std::cout << val << " ";
+    }
+
+    std::cout << "----------------------" <<std::endl;
+    for(auto& val : refxC) {
+        std::cout << val << " ";
+    }
+
 
     // cudaMemcpy(dxA.get(), const void *src, size_t count, enum cudaMemcpyKind kind)
 
