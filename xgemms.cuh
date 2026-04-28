@@ -26,7 +26,7 @@ __global__ void gemm_bf16_naive_kernel(const __nv_bfloat16 *__restrict__ A,
     acc += a * b;
   }
 
-  C[row + col * ldc] = acc;
+  C[row + col *  ldc] = acc;
 }
 
 void x_bf16(int M, int N, int K, const __nv_bfloat16 *d_A,
