@@ -20,6 +20,19 @@ __global__ void cp_async_kernel(const float* __restrict__ gmem,
     out[blockIdx.x * blockDim.x + tid] = smem[tid] * 2.0f;
 }
 
+__global__ void cp_async_k1(const float* __restrict__ gmem,
+                                 float* __restrict__ out, int N) {
+     extern __shared__ float smem[];
+     auto block = cg::this_thread_block();
+     auto grid = cg::this_grid();
+     auto  = cg::this_thread_block().num_threads();
+
+
+
+
+}
+
+
 int main() {
 
    return 0;

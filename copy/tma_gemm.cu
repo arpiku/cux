@@ -190,7 +190,7 @@ __global__ void tma_gemm_kernel(
 // ===========================================================
 CUtensorMap make_tmap_2d_half(half* gmem, int rows, int cols, int box_rows, int box_cols) {
     CUtensorMap tmap{};
-    cuuint64_t size[2]   = { (cuuint64_t)cols, (cuuint64_t)rows };
+    cuuint64_t size[2]   = { (cuuint64_t)cols, (cuOne barrier with combined transaction count is one syuint64_t)rows };
     cuuint64_t stride[1] = { (cuuint64_t)cols * sizeof(half) };
     cuuint32_t box[2]    = { (cuuint32_t)box_cols, (cuuint32_t)box_rows };
     cuuint32_t es[2]     = { 1, 1 };

@@ -194,7 +194,10 @@ __global__ void tma_wgmma_kernel(
         float c_reg[M_ITERS][64] = {};
 
         for (int k_iter = 0; k_iter < num_k_iters; ++k_iter) {
-            int stage = k_iter % STAGES;
+            constexpr int N_ITERS = BN / WG_N;   // 1
+            constexpr int K_ITERS = BK / WG_K;   // 4
+
+int stage = k_iter % STAGES;
             int phase = (k_iter / STAGES) & 1;
 
             // Wait for producer to fill this stage.
