@@ -1,3 +1,4 @@
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <random>
@@ -13,7 +14,8 @@
 #include "cugemms.cuh"
 #include "xgemms.cuh"
 
-template <typename T> class DeviceBuffer {
+template <typename T>
+class DeviceBuffer {
 public:
   DeviceBuffer() = default;
 
@@ -299,6 +301,82 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
   return {{cu_bench_result, cublas_l2}, {x_bench_result, custom_l2}};
 }
 
+void print_comparison(const std::tuple<Report, Report> &res) {
+  const auto &[cublas_report, custom_report] = res;
+
+  const auto &shape = cublas_report.res.shape;
+
+  // cuBLAS results
+  float cublas_avg_ms = cublas_report.res.avg_ms;
+  double cublas_tflops = cublas_report.res.tflops;
+  double cublas_l2 = cublas_report.l2_err;
+
+  // Custom kernel results
+  float custom_avg_ms = custom_report.res.avg_ms;
+  double custom_tflops = custom_report.res.tflops;
+  double custom_l2 = custom_report.l2_err;
+
+  // Derived metrics
+  float cublas_avg_sec = cublas_avg_ms / 1000.0f;
+  float custom_avg_sec = custom_avg_ms / 1000.0f;
+  double speed_pct = (cublas_avg_ms > 0.0f)
+                         ? (static_cast<double>(cublas_avg_ms) /
+                            static_cast<double>(custom_avg_ms)) *
+                               100.0
+                         : 0.0;
+
+  constexpr int W = 18;
+
+  std::cout << "\n" << std::string(80, '=') << "\n";
+  std::cout << "  GEMM Benchmark Comparison\n";
+  std::cout << "  Shape:  M=" << shape.m << ", N=" << shape.n
+            << ", K=" << shape.k << "\n";
+  std::cout << "  Warmup: " << cublas_report.res.warmup_iters
+            << " iters  |  Bench: " << cublas_report.res.bench_iters
+            << " iters\n";
+  std::cout << std::string(80, '=') << "\n";
+
+  auto print_row = [](const std::string &label, float time_s, float time_ms,
+                      double tflops, double l2, double speed_pct,
+                      bool is_cublas) {
+    std::cout << "  " << std::left << std::setw(12) << label;
+    std::cout << "  " << std::right << std::fixed << std::setprecision(6)
+              << std::setw(W) << time_s << " s";
+    std::cout << "  " << std::fixed << std::setprecision(3) << std::setw(W)
+              << time_ms << " ms";
+    std::cout << "  " << std::fixed << std::setprecision(2) << std::setw(W)
+              << tflops << " TFLOPS";
+    std::cout << "  " << std::scientific << std::setprecision(2) << std::setw(W)
+              << l2 << " L2 err";
+    if (is_cublas) {
+      std::cout << "  " << std::string(W, ' ') << " (baseline)";
+    } else {
+      std::cout << "  " << std::fixed << std::setprecision(1) << std::setw(W)
+                << speed_pct << " % speed";
+    }
+    std::cout << "\n";
+  };
+
+  print_row("cuBLAS", cublas_avg_sec, cublas_avg_ms, cublas_tflops, cublas_l2,
+            0.0, true);
+  print_row("Custom", custom_avg_sec, custom_avg_ms, custom_tflops, custom_l2,
+            speed_pct, false);
+
+  std::cout << std::string(80, '-') << "\n";
+
+  if (speed_pct >= 100.0) {
+    std::cout << "  >>> Custom kernel is " << std::fixed << std::setprecision(1)
+              << (speed_pct - 100.0) << "% FASTER than cuBLAS.\n";
+  } else {
+    std::cout << "  >>> Custom kernel achieves " << std::fixed
+              << std::setprecision(1) << speed_pct
+              << "% of cuBLAS performance."
+              << "  (" << std::fixed << std::setprecision(1)
+              << (100.0 - speed_pct) << "% slower)\n";
+  }
+  std::cout << std::string(80, '=') << "\n" << std::endl;
+}
+
 int main() {
 
   GemmShape shape({512, 512, 512});
@@ -315,6 +393,8 @@ int main() {
   };
 
   auto res = runner<__nv_bfloat16>(shape, x_gemm, cu_gemm, 1, 2);
+
+  print_comparison(res);
 
   return 0;
 }

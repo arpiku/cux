@@ -24,6 +24,12 @@ find_package(CUDAToolkit REQUIRED)
 # For CPU Parallel fun
 find_package(OpenMP REQUIRED)
 
+# CUDA + libstdc++ 16 trips over builtin traits while parsing STL headers.
+# Disable those traits for CUDA compilation so nvcc can consume the headers.
+target_compile_definitions(cux PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:_GLIBCXX_DO_NOT_USE_BUILTIN_TRAITS>
+)
+
 target_compile_options(cux PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>
 )
