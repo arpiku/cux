@@ -1,6 +1,6 @@
 [
   {
-    "label": "Debug cppx",
+    "label": "Debug cux",
     "adapter": "CodeLLDB",
     "request": "launch",
     "program": "${ZED_WORKTREE_ROOT}/build-debug/cux",
@@ -10,6 +10,20 @@
       "args": [
         "-c",
         "cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug -S . && cmake --build build-debug",
+      ],
+    },
+  },
+  {
+    "label": "Release cux",
+    "adapter": "CodeLLDB",
+    "request": "launch",
+    "program": "${ZED_WORKTREE_ROOT}/build-release/cux",
+    "cwd": "${ZED_WORKTREE_ROOT}",
+    "build": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "cmake -B build-release -DCMAKE_BUILD_TYPE=Release -S . && cmake --build build-release",
       ],
     },
   },
