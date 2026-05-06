@@ -1,3 +1,4 @@
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -196,6 +197,59 @@ std::vector<T> cpu_matmul_nn(const std::vector<T> &A, const std::vector<T> &B,
   return C;
 }
 
+__global__ void l2_error_kernel(const float *ref, const float *got,
+                                 std::size_t n, double *sum_sq) {
+  const std::size_t idx = static_cast<std::size_t>(blockIdx.x) * blockDim.x +
+                          static_cast<std::size_t>(threadIdx.x);
+  const std::size_t stride = static_cast<std::size_t>(blockDim.x) * gridDim.x;
+
+  double local_sum = 0.0;
+  for (std::size_t i = idx; i < n; i += stride) {
+    const double diff = static_cast<double>(got[i]) - static_cast<double>(ref[i]);
+    local_sum += diff * diff;
+  }
+
+  if (local_sum != 0.0) {
+    atomicAdd(sum_sq, local_sum);
+  }
+}
+
+inline double cuda_l2_error(const std::vector<float> &ref,
+                            const std::vector<float> &got) {
+  if (ref.size() != got.size()) {
+    throw std::runtime_error("l2_error: size mismatch");
+  }
+
+  const std::size_t n = ref.size();
+  if (n == 0) {
+    return 0.0;
+  }
+
+  DeviceBuffer<double> d_sum(1);
+  CUDA_CHECK(cudaMemset(d_sum.get(), 0, sizeof(double)));
+
+  DeviceBuffer<float> d_ref(n);
+  DeviceBuffer<float> d_got(n);
+
+  CUDA_CHECK(cudaMemcpy(d_ref.get(), ref.data(), n * sizeof(float),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_got.get(), got.data(), n * sizeof(float),
+                        cudaMemcpyHostToDevice));
+
+  constexpr int threads_per_block = 256;
+  const int blocks = static_cast<int>((n + threads_per_block - 1) / threads_per_block);
+
+  l2_error_kernel<<<blocks, threads_per_block>>>(d_ref.get(), d_got.get(), n,
+                                                 d_sum.get());
+  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK(cudaDeviceSynchronize());
+
+  double sum_sq = 0.0;
+  CUDA_CHECK(cudaMemcpy(&sum_sq, d_sum.get(), sizeof(double),
+                        cudaMemcpyDeviceToHost));
+  return std::sqrt(sum_sq);
+}
+
 struct Report {
   BenchmarkResult res;
   double l2_err = 0.0f;
@@ -221,23 +275,7 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
        unsigned int seed_a, unsigned int seed_b, float lo = 0.0f,
        float hi = 1.0f, int warm_up_iters = 10, int bench_iters = 100) {
 
-  auto l2_error = [](const std::vector<float> &ref,
-                     const std::vector<float> &got) -> double {
-    if (ref.size() != got.size()) {
-      throw std::runtime_error("l2_error: size mismatch");
-    }
 
-    double sum_sq = 0.0;
-
-#pragma omp parallel for reduction(+ : sum_sq) schedule(static)
-    for (std::size_t i = 0; i < ref.size(); ++i) {
-      const double diff =
-          static_cast<double>(got[i]) - static_cast<double>(ref[i]);
-      sum_sq += diff * diff;
-    }
-
-    return std::sqrt(sum_sq);
-  };
 
   std::vector<InputT> hxA(shape.m * shape.k);
   std::vector<InputT> hxB(shape.k * shape.n);
@@ -312,8 +350,8 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
   BenchmarkResult x_bench_result =
       benchmark_kernel(shape, loaded_x_kernel, warm_up_iters, bench_iters);
 
-  double cublas_l2 = l2_error(refxC, cublasxC);
-  double custom_l2 = l2_error(refxC, customxC);
+  double cublas_l2 = cuda_l2_error(refxC, cublasxC);
+  double custom_l2 = cuda_l2_error(refxC, customxC);
 
   return {{cu_bench_result, cublas_l2}, {x_bench_result, custom_l2}};
 }

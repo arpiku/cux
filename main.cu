@@ -1,7 +1,7 @@
 #include "main.cuh"
 
 int main() {
-  std::vector<GemmShape> shapes = get_shape_list(5, 10);
+  std::vector<GemmShape> shapes = get_shape_list(5, 12);
   std::vector<ComparisonRow> rows;
   rows.reserve(shapes.size());
 
