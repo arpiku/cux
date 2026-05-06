@@ -1,8 +1,12 @@
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <random>
+#include <sstream>
+#include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <cublas_v2.h>
@@ -197,6 +201,20 @@ struct Report {
   double l2_err = 0.0f;
 };
 
+struct ComparisonRow {
+  GemmShape shape{};
+  float cublas_avg_ms = 0.0f;
+  float custom_avg_ms = 0.0f;
+  double cublas_tflops = 0.0;
+  double custom_tflops = 0.0;
+  double cublas_l2 = 0.0;
+  double custom_l2 = 0.0;
+  double speed_pct = 0.0;
+  double speed_delta_pct = 0.0;
+  int warmup_iters = 0;
+  int bench_iters = 0;
+};
+
 template <typename InputT, typename Xkernel, typename CuKernel>
 std::tuple<Report, Report>
 runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
@@ -300,78 +318,149 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
   return {{cu_bench_result, cublas_l2}, {x_bench_result, custom_l2}};
 }
 
-void print_comparison(const std::tuple<Report, Report> &res) {
-  const auto &[cublas_report, custom_report] = res;
+inline std::string format_scientific(double value, int precision = 2) {
+  std::ostringstream oss;
+  oss << std::scientific << std::setprecision(precision) << value;
+  return oss.str();
+}
 
+inline std::string format_seconds(double seconds, int precision = 3) {
+  std::ostringstream oss;
+  oss << format_scientific(seconds, precision) << " s";
+  return oss.str();
+}
+
+inline std::string format_speed_pct(double pct) {
+  std::ostringstream oss;
+  const double delta = pct - 100.0;
+  oss << std::fixed << std::setprecision(1) << pct << "% [";
+  if (delta >= 0.0) {
+    oss << "+";
+  }
+  oss << std::fixed << std::setprecision(1) << delta << "%]";
+  return oss.str();
+}
+
+inline std::string format_shape(const GemmShape &shape) {
+  std::ostringstream oss;
+  oss << shape.m << "x" << shape.n << "x" << shape.k;
+  return oss.str();
+}
+
+inline ComparisonRow make_comparison_row(const std::tuple<Report, Report> &res) {
+  const auto &[cublas_report, custom_report] = res;
   const auto &shape = cublas_report.res.shape;
 
-  // cuBLAS results
-  float cublas_avg_ms = cublas_report.res.avg_ms;
-  double cublas_tflops = cublas_report.res.tflops;
-  double cublas_l2 = cublas_report.l2_err;
+  ComparisonRow row{};
+  row.shape = shape;
+  row.cublas_avg_ms = cublas_report.res.avg_ms;
+  row.custom_avg_ms = custom_report.res.avg_ms;
+  row.cublas_tflops = cublas_report.res.tflops;
+  row.custom_tflops = custom_report.res.tflops;
+  row.cublas_l2 = cublas_report.l2_err;
+  row.custom_l2 = custom_report.l2_err;
+  row.speed_pct = (row.cublas_avg_ms > 0.0f && row.custom_avg_ms > 0.0f)
+                      ? (static_cast<double>(row.cublas_avg_ms) /
+                         static_cast<double>(row.custom_avg_ms)) * 100.0
+                      : 0.0;
+  row.speed_delta_pct = row.speed_pct - 100.0;
+  row.warmup_iters = cublas_report.res.warmup_iters;
+  row.bench_iters = cublas_report.res.bench_iters;
+  return row;
+}
 
-  // Custom kernel results
-  float custom_avg_ms = custom_report.res.avg_ms;
-  double custom_tflops = custom_report.res.tflops;
-  double custom_l2 = custom_report.l2_err;
-
-  // Derived metrics
-  float cublas_avg_sec = cublas_avg_ms / 1000.0f;
-  float custom_avg_sec = custom_avg_ms / 1000.0f;
-  double speed_pct = (cublas_avg_ms > 0.0f)
-                         ? (static_cast<double>(cublas_avg_ms) /
-                            static_cast<double>(custom_avg_ms)) *
-                               100.0
-                         : 0.0;
-
-  constexpr int W = 18;
-
-  std::cout << "\n" << std::string(80, '=') << "\n";
-  std::cout << "  GEMM Benchmark Comparison\n";
-  std::cout << "  Shape:  M=" << shape.m << ", N=" << shape.n
-            << ", K=" << shape.k << "\n";
-  std::cout << "  Warmup: " << cublas_report.res.warmup_iters
-            << " iters  |  Bench: " << cublas_report.res.bench_iters
-            << " iters\n";
-  std::cout << std::string(80, '=') << "\n";
-
-  auto print_row = [](const std::string &label, float time_s, float time_ms,
-                      double tflops, double l2, double speed_pct,
-                      bool is_cublas) {
-    std::cout << "  " << std::left << std::setw(12) << label;
-    std::cout << "  " << std::right << std::fixed << std::setprecision(6)
-              << std::setw(W) << time_s << " s";
-    std::cout << "  " << std::fixed << std::setprecision(3) << std::setw(W)
-              << time_ms << " ms";
-    std::cout << "  " << std::fixed << std::setprecision(2) << std::setw(W)
-              << tflops << " TFLOPS";
-    std::cout << "  " << std::scientific << std::setprecision(2) << std::setw(W)
-              << l2 << " L2 err";
-    if (is_cublas) {
-      std::cout << "  " << std::string(W, ' ') << " (baseline)";
-    } else {
-      std::cout << "  " << std::fixed << std::setprecision(1) << std::setw(W)
-                << speed_pct << " % speed";
-    }
-    std::cout << "\n";
-  };
-
-  print_row("cuBLAS", cublas_avg_sec, cublas_avg_ms, cublas_tflops, cublas_l2,
-            0.0, true);
-  print_row("Custom", custom_avg_sec, custom_avg_ms, custom_tflops, custom_l2,
-            speed_pct, false);
-
-  std::cout << std::string(80, '-') << "\n";
-
-  if (speed_pct >= 100.0) {
-    std::cout << "  >>> Custom kernel is " << std::fixed << std::setprecision(1)
-              << (speed_pct - 100.0) << "% FASTER than cuBLAS.\n";
-  } else {
-    std::cout << "  >>> Custom kernel achieves " << std::fixed
-              << std::setprecision(1) << speed_pct
-              << "% of cuBLAS performance."
-              << "  (" << std::fixed << std::setprecision(1)
-              << (100.0 - speed_pct) << "% slower)\n";
+inline void print_comparison_table(const std::vector<ComparisonRow> &rows) {
+  if (rows.empty()) {
+    std::cout << "No benchmark rows to print.\n";
+    return;
   }
-  std::cout << std::string(80, '=') << "\n" << std::endl;
+
+  constexpr int W_SHAPE = 12;
+  constexpr int W_SECS = 16;
+  constexpr int W_PCT = 22;
+  constexpr int W_L2 = 18;
+  constexpr int W_TF = 14;
+
+  std::cout << std::string(132, '=') << "\n";
+  std::cout << "  GEMM Benchmark Summary\n";
+  std::cout << "  Warmup iters: " << rows.front().warmup_iters
+            << " | Bench iters: " << rows.front().bench_iters << "\n";
+  std::cout << std::string(132, '-') << "\n";
+
+  std::cout << std::left << std::setw(W_SHAPE) << "Shape"
+            << std::right << std::setw(W_SECS) << "cuBLAS (s)"
+            << std::setw(W_SECS) << "Custom (s)"
+            << std::setw(W_PCT) << "Custom % of cuBLAS"
+            << std::setw(W_L2) << "cuBLAS L2"
+            << std::setw(W_L2) << "Custom L2"
+            << std::setw(W_TF) << "cuBLAS TF"
+            << std::setw(W_TF) << "Custom TF"
+            << "\n";
+  std::cout << std::string(132, '-') << "\n";
+
+  double sum_cublas_sec = 0.0;
+  double sum_custom_sec = 0.0;
+  double sum_speed_pct = 0.0;
+
+  const ComparisonRow *best_row = &rows.front();
+  const ComparisonRow *worst_row = &rows.front();
+
+  for (const auto &row : rows) {
+    const double cublas_sec = static_cast<double>(row.cublas_avg_ms) / 1000.0;
+    const double custom_sec = static_cast<double>(row.custom_avg_ms) / 1000.0;
+
+    sum_cublas_sec += cublas_sec;
+    sum_custom_sec += custom_sec;
+    sum_speed_pct += row.speed_pct;
+
+    if (row.speed_pct > best_row->speed_pct) {
+      best_row = &row;
+    }
+    if (row.speed_pct < worst_row->speed_pct) {
+      worst_row = &row;
+    }
+
+    std::cout << std::left << std::setw(W_SHAPE) << format_shape(row.shape)
+              << std::right << std::setw(W_SECS) << format_seconds(cublas_sec)
+              << std::setw(W_SECS) << format_seconds(custom_sec)
+              << std::setw(W_PCT) << format_speed_pct(row.speed_pct)
+              << std::setw(W_L2) << format_scientific(row.cublas_l2)
+              << std::setw(W_L2) << format_scientific(row.custom_l2)
+              << std::setw(W_TF) << format_scientific(row.cublas_tflops, 2)
+              << std::setw(W_TF) << format_scientific(row.custom_tflops, 2)
+              << "\n";
+  }
+
+  const double avg_cublas_sec = sum_cublas_sec / static_cast<double>(rows.size());
+  const double avg_custom_sec = sum_custom_sec / static_cast<double>(rows.size());
+  const double avg_speed_pct = sum_speed_pct / static_cast<double>(rows.size());
+
+  std::cout << std::string(132, '-') << "\n";
+  std::cout << "  Overall avg custom speed: " << format_speed_pct(avg_speed_pct)
+            << " | Avg cuBLAS: " << format_seconds(avg_cublas_sec)
+            << " | Avg custom: " << format_seconds(avg_custom_sec) << "\n";
+  std::cout << "  Best  custom speed:      "
+            << format_speed_pct(best_row->speed_pct) << " @ "
+            << format_shape(best_row->shape) << " ("
+            << format_seconds(static_cast<double>(best_row->cublas_avg_ms) / 1000.0)
+            << " vs "
+            << format_seconds(static_cast<double>(best_row->custom_avg_ms) / 1000.0)
+            << ")\n";
+  std::cout << "  Worst custom speed:      "
+            << format_speed_pct(worst_row->speed_pct) << " @ "
+            << format_shape(worst_row->shape) << " ("
+            << format_seconds(static_cast<double>(worst_row->cublas_avg_ms) / 1000.0)
+            << " vs "
+            << format_seconds(static_cast<double>(worst_row->custom_avg_ms) / 1000.0)
+            << ")\n";
+  std::cout << std::string(132, '=') << "\n";
+}
+
+std::vector<GemmShape> get_shape_list(uint32_t n0, uint32_t n1) {
+  std::vector<GemmShape> shapes(n1 - n0 + 1);
+  for (uint32_t i = n0; i <= n1; ++i) {
+    uint32_t dim = 1u << i;
+    shapes[i - n0] = GemmShape{dim, dim, dim};
+  }
+  return shapes;
 }
