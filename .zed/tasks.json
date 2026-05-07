@@ -1,0 +1,14 @@
+[
+  {
+    "label": "Run release build",
+    "command": "${ZED_WORKTREE_ROOT}/build-release/cux",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": true,
+  },
+  {
+    "label": "Build release build",
+    "command": "cmake -B build-release -DCMAKE_BUILD_TYPE=Release -S . && cmake --build build-release",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": true,
+  },
+]

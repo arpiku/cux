@@ -9,7 +9,7 @@ int main() {
     auto x_gemm = [&](int m, int n, int k, const __nv_bfloat16 *a_,
                       const __nv_bfloat16 *b_, float *c_,
                       cudaStream_t stream) {
-      xgemms::x0a_bf16(m, n, k, a_, b_, c_, stream);
+      xgemms::x0_bf16_4(m, n, k, a_, b_, c_, stream);
     };
 
     auto cu_gemm = [&](cublasHandle_t handle, int m, int n, int k,
@@ -18,7 +18,7 @@ int main() {
       cugemms::bf16_tc_nn(handle, m, n, k, a_, b_, c_, stream);
     };
 
-    auto res = runner<__nv_bfloat16>(shape, x_gemm, cu_gemm, 1, 2);
+    auto res = runner<__nv_bfloat16>(shape, x_gemm, cu_gemm, 1, 2, false);
     rows.push_back(make_comparison_row(res));
   }
 
