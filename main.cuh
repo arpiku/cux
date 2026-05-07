@@ -273,9 +273,7 @@ template <typename InputT, typename Xkernel, typename CuKernel>
 std::tuple<Report, Report>
 runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
        unsigned int seed_a, unsigned int seed_b, float lo = 0.0f,
-       float hi = 1.0f, int warm_up_iters = 10, int bench_iters = 100) {
-
-
+       float hi = 1.0f, int warm_up_iters = 10, int bench_iters = 50) {
 
   std::vector<InputT> hxA(shape.m * shape.k);
   std::vector<InputT> hxB(shape.k * shape.n);
@@ -285,17 +283,23 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
   DeviceBuffer<InputT> dxB(hxB.size());
   DeviceBuffer<float> dxC(refxC.size());
 
-  std::vector<float> cublasxC(shape.m * shape.n); // cublas result
-  std::vector<float> customxC(shape.m * shape.n); // custom kernel result
+  std::vector<float> cublasxC(shape.m * shape.n);
+  std::vector<float> customxC(shape.m * shape.n);
 
   parallel_random_fill(hxA, seed_a, lo, hi);
   parallel_random_fill(hxB, seed_b, lo, hi);
+
+  // Upload benchmark inputs once so both kernels read the same data.
+  CUDA_CHECK(cudaMemcpy(dxA.get(), hxA.data(), hxA.size() * sizeof(InputT),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(dxB.get(), hxB.data(), hxB.size() * sizeof(InputT),
+                        cudaMemcpyHostToDevice));
 
   { // Reusing the handle shouldn't be an issue, but still, keeping things fresh
     // for the benchmark section anyways
     CublasHandle ref_cublas_handle;
     cudaStream_t s;
-    cudaStreamCreate(&s);
+    CUDA_CHECK(cudaStreamCreate(&s));
 
     std::vector<float> refA(shape.m * shape.k);
     std::vector<float> refB(shape.k * shape.n);
@@ -310,17 +314,20 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
     DeviceBuffer<float> refDxC(refxC.size());
 
     CUDA_CHECK(cudaMemcpy(refDxA.get(), refA.data(),
-                          refA.size() * sizeof(float), cudaMemcpyHostToDevice));
+                          refA.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(refDxB.get(), refB.data(),
-                          refB.size() * sizeof(float), cudaMemcpyHostToDevice));
+                          refB.size() * sizeof(float),
+                          cudaMemcpyHostToDevice));
 
     cugemms::fp32_pedantic_nn(ref_cublas_handle.get(), shape.m, shape.n,
-                              shape.k, refDxA.get(), refDxB.get(), refDxC.get(),
-                              s);
-    CUDA_CHECK(cudaMemcpy(refxC.data(), dxC.get(), dxC.size() * sizeof(float),
+                              shape.k, refDxA.get(), refDxB.get(),
+                              refDxC.get(), s);
+    CUDA_CHECK(cudaStreamSynchronize(s));
+    CUDA_CHECK(cudaMemcpy(refxC.data(), refDxC.get(),
+                          refDxC.size() * sizeof(float),
                           cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
-    cudaStreamDestroy(s);
+    CUDA_CHECK(cudaStreamDestroy(s));
   }
 
   CublasHandle cublas_handle;
@@ -330,25 +337,27 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
               dxB.get(), dxC.get(), stream);
   };
 
-  CUDA_CHECK(cudaMemcpy(cublasxC.data(), dxC.get(), dxC.size() * sizeof(float),
-                        cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
+  BenchmarkResult cu_bench_result =
+      benchmark_kernel(shape, loaded_cu_kernel, warm_up_iters, bench_iters);
 
-  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(cublasxC.data(), dxC.get(),
+                        dxC.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost));
+
+  CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
 
   auto loaded_x_kernel = [&](cudaStream_t stream) {
     x_kernel(shape.m, shape.n, shape.k, dxA.get(), dxB.get(), dxC.get(),
              stream);
   };
 
-  CUDA_CHECK(cudaMemcpy(customxC.data(), dxC.get(), dxC.size() * sizeof(float),
-                        cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemset(dxC.get(), 0, dxC.size() * sizeof(float)));
-
-  BenchmarkResult cu_bench_result =
-      benchmark_kernel(shape, loaded_cu_kernel, warm_up_iters, bench_iters);
   BenchmarkResult x_bench_result =
       benchmark_kernel(shape, loaded_x_kernel, warm_up_iters, bench_iters);
+
+  CUDA_CHECK(cudaMemcpy(customxC.data(), dxC.get(),
+                        dxC.size() * sizeof(float),
+                        cudaMemcpyDeviceToHost));
 
   double cublas_l2 = cuda_l2_error(refxC, cublasxC);
   double custom_l2 = cuda_l2_error(refxC, customxC);

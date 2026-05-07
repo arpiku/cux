@@ -14,7 +14,10 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # CUDA architectures: Hopper (sm_90a) and Blackwell (sm_120)
 set(CMAKE_CUDA_ARCHITECTURES 90a 120)
 
-# Explicit -O3 for Release builds
+# Explicit flags for build types
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
+set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -g -G -O0 -lineinfo")
+
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG")
 
