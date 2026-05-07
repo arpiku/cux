@@ -270,13 +270,12 @@ struct ComparisonRow {
 };
 
 template <typename InputT, typename Xkernel, typename CuKernel>
-std::tuple<Report, Report>
-runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
+std::tuple<Report, Report> runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
        unsigned int seed_a, unsigned int seed_b, float lo = 0.0f,
-       float hi = 1.0f, int warm_up_iters = 10, int bench_iters = 50) {
+       float hi = 1.0f, int warm_up_iters = 10, int bench_iters = 50, bool random = true) {
 
-  std::vector<InputT> hxA(shape.m * shape.k);
-  std::vector<InputT> hxB(shape.k * shape.n);
+  std::vector<InputT> hxA(shape.m * shape.k, 1);
+  std::vector<InputT> hxB(shape.k * shape.n, 1);
   std::vector<float> refxC(shape.m * shape.n);
 
   DeviceBuffer<InputT> dxA(hxA.size());
@@ -286,9 +285,10 @@ runner(const GemmShape &shape, Xkernel &&x_kernel, CuKernel &&cu_kernel,
   std::vector<float> cublasxC(shape.m * shape.n);
   std::vector<float> customxC(shape.m * shape.n);
 
+if (random) {
   parallel_random_fill(hxA, seed_a, lo, hi);
   parallel_random_fill(hxB, seed_b, lo, hi);
-
+}
   // Upload benchmark inputs once so both kernels read the same data.
   CUDA_CHECK(cudaMemcpy(dxA.get(), hxA.data(), hxA.size() * sizeof(InputT),
                         cudaMemcpyHostToDevice));
