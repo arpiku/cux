@@ -6,6 +6,8 @@ set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-std=c++17 -Xcompiler=-fno-
 
 project(cux LANGUAGES CXX CUDA)
 
+set(CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/cute/cutlass" CACHE PATH "Path to a CUTLASS checkout containing include/cute")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
@@ -28,8 +30,19 @@ add_executable(cux
     main.cu
 )
 
+set_source_files_properties(cute/cute.cu PROPERTIES LANGUAGE CXX COMPILE_FLAGS "-x c++")
+
+add_executable(cute_demo
+    cute/cute.cu
+)
+
 target_include_directories(cux PRIVATE
     .
+)
+
+target_include_directories(cute_demo PRIVATE
+    .
+    ${CUTLASS_DIR}/include
 )
 
 find_package(CUDAToolkit REQUIRED)
@@ -42,6 +55,10 @@ target_compile_definitions(cux PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:_GLIBCXX_DO_NOT_USE_BUILTIN_TRAITS>
 )
 
+target_compile_definitions(cute_demo PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:_GLIBCXX_DO_NOT_USE_BUILTIN_TRAITS>
+)
+
 target_compile_options(cux PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>
 )
@@ -50,4 +67,8 @@ target_link_libraries(cux PRIVATE
     CUDA::cudart
     CUDA::cublas
     OpenMP::OpenMP_CXX
+)
+
+target_link_libraries(cute_demo PRIVATE
+    CUDA::cudart
 )
